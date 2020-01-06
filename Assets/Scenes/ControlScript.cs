@@ -1,6 +1,6 @@
-﻿using System.Collections;
+﻿using UnityEngine;
+using System.Collections;
 using System.Collections.Generic;
-using UnityEngine;
 using System.IO.Pipes;
 using System.Net.Sockets;
 using System.ComponentModel;
@@ -10,6 +10,7 @@ using System.Threading;
 public class ControlScript : MonoBehaviour
 {
     public string inputMethod;
+    public GameObject[] availableGameObjects;
 
     private enum inputMethodE { Glove=0, Box};
     private inputMethodE im;
@@ -25,9 +26,16 @@ public class ControlScript : MonoBehaviour
     private float pitch = 0.0F;
     private float yaw = 0.0F;
 
+    private GameObject currentGameObject;
+    private int gameObjectIndex;
 
     void Start()
     {
+        // initialize object we are controlling
+        gameObjectIndex = 0;
+        currentGameObject = availableGameObjects[0];
+        Debug.Log("Current Game Object set to " + currentGameObject.name);
+
         if (inputMethod == "Box")
         {
             im = inputMethodE.Box;
@@ -51,14 +59,43 @@ public class ControlScript : MonoBehaviour
 
     void Update()
     {
+        // handle key presses
+        if (Input.GetKeyUp(KeyCode.UpArrow))
+        {
+            if (gameObjectIndex + 1 >= availableGameObjects.Length)
+                gameObjectIndex = 0;
+            else
+                gameObjectIndex += 1;
+
+            currentGameObject = availableGameObjects[gameObjectIndex];
+            Debug.Log("Current Game Object set to " + currentGameObject.name);
+        }
+        if (Input.GetKeyUp(KeyCode.DownArrow))
+        {
+            if (gameObjectIndex == 0)
+                gameObjectIndex = availableGameObjects.Length - 1;
+            else
+                gameObjectIndex -= 1;
+
+            currentGameObject = availableGameObjects[gameObjectIndex];
+            Debug.Log("Current Game Object set to " + currentGameObject.name);
+        }
+
+        // handle events from input methods
         if (im == inputMethodE.Glove)
         {
             // check if we got something on the named pipe
             if (gloveGestureQueue.Count > 0)
             {
-                string gestureString = (string)gloveGestureQueue.Dequeue();
-                Debug.Log("Gesture string (out of queue) is " + gestureString);
-                // parse gestureString - of form '4 1,1,1'
+                byte[] gestureByteArr = (byte [])gloveGestureQueue.Dequeue();
+
+                // parse byte array - of form '4 1,1,1'
+                // it is a wchar_t* - so we have 2x the number of bytes
+                byte[] gba = removeExtraBytes(gestureByteArr);
+
+                // now convert it to a string so we can parse
+                string gestureString = System.Text.Encoding.UTF8.GetString(gba);
+                Debug.Log(gestureString);
                 string[] splitRes = gestureString.Split(' ');
                 System.Int32 gestureCode, xVal, yVal, zVal;
                 bool res = System.Int32.TryParse(splitRes[0], out gestureCode);
@@ -79,12 +116,12 @@ public class ControlScript : MonoBehaviour
                             break;
                         case 3:
                             // Rotate
-                            gameObject.transform.Rotate(xVal, yVal, zVal);
+                            currentGameObject.transform.Rotate(xVal, yVal, zVal);
                             break;
                         case 4:
                             // Pan
                             Debug.Log("Gesture received is Pan and we are going to translate by: " + xVal.ToString() + " " + yVal.ToString() + " " + zVal.ToString());
-                            gameObject.transform.localScale += new Vector3(xVal, yVal, zVal);
+                            currentGameObject.transform.localScale += new Vector3(xVal, yVal, zVal);
                             break;
                         default:
                             Debug.Log("Gesture code not recognized");
@@ -98,7 +135,7 @@ public class ControlScript : MonoBehaviour
             }
         } else if (im == inputMethodE.Box)
         {
-            gameObject.transform.rotation = Quaternion.Euler(new Vector3(roll, yaw, pitch));
+            currentGameObject.transform.rotation = Quaternion.Euler(new Vector3(roll, yaw, pitch));
         }
     }
 
@@ -224,16 +261,9 @@ public class ControlScript : MonoBehaviour
             }
             if (ret > 0)
             {
-                Debug.Log("Length of buffer gotten from pipe is " + ret.ToString());
-                char[] bufCharArr = new char[ret + 1];
-                System.Array.Copy(buffer, 0, bufCharArr, 0, ret);
-                bufCharArr[ret] = '\0';
-                Debug.Log(bufCharArr);
-                string bufString = new string(bufCharArr);
-                Debug.Log("buf string is " + bufString + " with length " + bufString.Length);
-                // TODO: this is not getting full string (its just giving 4)
-                //string bufString = System.Text.Encoding.UTF8.GetString(buffer, 0, ret);
-                gloveGestureQueue.Enqueue(bufString);
+                byte[] gestureByteArr = new byte[ret];
+                System.Array.Copy(buffer, 0, gestureByteArr, 0, ret);
+                gloveGestureQueue.Enqueue(gestureByteArr);
             }
         }
         clientStream.Close();
@@ -270,5 +300,18 @@ public class ControlScript : MonoBehaviour
     void OnConnectionEvent(bool success)
     {
         Debug.Log("On connection event called with bool " + success.ToString());
+    }
+
+    // Since we receive input in the form of wchar_t*, but the first byte for each char is just
+    // padding, we use this to remove the padding bytes
+    byte[] removeExtraBytes(byte[] arr)
+    {
+        byte[] newArr = new byte[arr.Length / 2 + 1];
+        newArr[arr.Length / 2] = 0;
+        for (int i = 0; i < arr.Length; i += 2)
+        {
+            newArr[i / 2] = arr[i];
+        }
+        return newArr;
     }
 }
