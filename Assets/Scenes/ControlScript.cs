@@ -21,6 +21,7 @@ public class ControlScript : MonoBehaviour
     private TcpClient client;
     private Thread namedPipeThread;
     private Queue gloveGestureQueue;
+    private static readonly Object lockobj = new Object();
 
     private float roll = 0.0F;
     private float pitch = 0.0F;
@@ -29,12 +30,25 @@ public class ControlScript : MonoBehaviour
     private GameObject currentGameObject;
     private int gameObjectIndex;
 
+    // for "lerping" and "slerping" our gestures to make them look smooth for the glove
+    private bool inRotate;
+    private bool inPan;
+    private Quaternion startRotation;
+    private Quaternion endRotation;
+    private float panLength; // for translate
+    private Vector3 startPosition; // for translate
+    private Vector3 endPosition; // for translate
+    private float startTimePan; // for translate
+    private float timeCount = 0.0f;
+
     void Start()
     {
         // initialize object we are controlling
         gameObjectIndex = 0;
         currentGameObject = availableGameObjects[0];
         Debug.Log("Current Game Object set to " + currentGameObject.name);
+        // generate id
+        g = System.Guid.NewGuid();
 
         if (inputMethod == "Box")
         {
@@ -53,8 +67,7 @@ public class ControlScript : MonoBehaviour
         {
             exitCurrentRuntime();
         }
-        // generate id
-        g = System.Guid.NewGuid();
+       
     }
 
     void Update()
@@ -84,56 +97,111 @@ public class ControlScript : MonoBehaviour
         // handle events from input methods
         if (im == inputMethodE.Glove)
         {
-            // check if we got something on the named pipe
-            if (gloveGestureQueue.Count > 0)
+            float translateSpeed = 45f;
+            int rotateSpeed = 25;
+
+            // check if we are in motion first
+            if (inRotate)
             {
-                byte[] gestureByteArr = (byte [])gloveGestureQueue.Dequeue();
+                Debug.Log("In rotate");
+                float rotateCovered = (Time.time - startTimePan) * rotateSpeed;
+                float fractionOfJourney = rotateCovered / (Quaternion.Angle(endRotation, startRotation));
+                currentGameObject.transform.rotation = Quaternion.Slerp(startRotation, endRotation, fractionOfJourney);
 
-                // parse byte array - of form '4 1,1,1'
-                // it is a wchar_t* - so we have 2x the number of bytes
-                byte[] gba = removeExtraBytes(gestureByteArr);
-
-                // now convert it to a string so we can parse
-                string gestureString = System.Text.Encoding.UTF8.GetString(gba);
-                Debug.Log(gestureString);
-                string[] splitRes = gestureString.Split(' ');
-                System.Int32 gestureCode, xVal, yVal, zVal;
-                bool res = System.Int32.TryParse(splitRes[0], out gestureCode);
-                string[] xyzStrings = splitRes[1].Split(',');
-                Debug.Log("xyzStrings raw is " + xyzStrings[0] + " " + xyzStrings[1] + " " + xyzStrings[2]);
-                bool xRes = System.Int32.TryParse(xyzStrings[0], out xVal);
-                bool yRes = System.Int32.TryParse(xyzStrings[1], out yVal);
-                bool zRes = System.Int32.TryParse(xyzStrings[2], out zVal);
-                if (res && xRes && yRes && zRes)
+                if (Quaternion.Angle(endRotation, currentGameObject.transform.rotation) < 2)
                 {
-                    switch (gestureCode)
-                    {
-                        case 1:
-                            // Zoom in
-                            break;
-                        case 2:
-                            // Zoom out
-                            break;
-                        case 3:
-                            // Rotate
-                            currentGameObject.transform.Rotate(xVal, yVal, zVal);
-                            break;
-                        case 4:
-                            // Pan
-                            Debug.Log("Gesture received is Pan and we are going to translate by: " + xVal.ToString() + " " + yVal.ToString() + " " + zVal.ToString());
-                            currentGameObject.transform.localScale += new Vector3(xVal, yVal, zVal);
-                            break;
-                        default:
-                            Debug.Log("Gesture code not recognized");
-                            break;
-                    }
-                } else
-                {
-                    Debug.Log("Error parsing values out of named pipe");
-                    return;
+                    inRotate = false;
+                    timeCount = 0.0f;
                 }
             }
-        } else if (im == inputMethodE.Box)
+            else if (inPan)
+            {
+                Debug.Log("In pan");
+                float distCovered = (Time.time - startTimePan) * translateSpeed;
+                float fractionOfJourney = distCovered / panLength;
+                currentGameObject.transform.position = Vector3.Lerp(startPosition, endPosition, fractionOfJourney);
+                if (Vector3.Distance(currentGameObject.transform.position, endPosition) < 3) { 
+                    inPan = false;
+                }
+            }
+            else
+            {
+
+                // check if we got something on the named pipe
+                int sizeQueue;
+                lock(lockobj)
+                {
+                    sizeQueue = gloveGestureQueue.Count;
+                }
+               // Debug.Log("size queue is");
+                //Debug.Log(sizeQueue.ToString());
+                if (sizeQueue > 0)
+                {
+                    byte[] gestureByteArr;
+                    lock (lockobj)
+                    {
+                        gestureByteArr = (byte[])gloveGestureQueue.Dequeue();
+                    }
+                    // parse byte array - of form '4 0:1,0:1,0:1'
+                    // it is a wchar_t* - so we have 2x the number of bytes
+                    byte[] gba = removeExtraBytes(gestureByteArr);
+
+                    // now convert it to a string so we can parse
+                    string gestureString = System.Text.Encoding.UTF8.GetString(gba);
+                    Debug.Log(gestureString);
+                    string[] splitRes = gestureString.Split(' ');
+                    System.Int32 gestureCode, xVal, yVal, zVal;
+
+                    bool res = System.Int32.TryParse(splitRes[0], out gestureCode);
+                    string[] xyzStrings = splitRes[1].Split(',');
+                    Debug.Log("xyzStrings raw is " + xyzStrings[0] + " " + xyzStrings[1] + " " + xyzStrings[2]);
+
+                    bool xRes = System.Int32.TryParse(xyzStrings[0].Split(':')[1], out xVal);
+                    bool yRes = System.Int32.TryParse(xyzStrings[1].Split(':')[1], out yVal);
+                    bool zRes = System.Int32.TryParse(xyzStrings[2].Split(':')[1], out zVal);
+                    if (xyzStrings[0].Split(':')[0] == "1") xVal *= -1;
+                    if (xyzStrings[1].Split(':')[0] == "1") yVal *= -1;
+                    if (xyzStrings[2].Split(':')[0] == "0") zVal *= -1; // this is because the axes are off in Unity vs the accelerometer - X goes positive into the camera, y positive to left, z positive down
+
+                    if (res && xRes && yRes && zRes)
+                    {
+                        switch (gestureCode)
+                        {
+                            case 1:
+                                // Zoom in
+                                break;
+                            case 2:
+                                // Zoom out
+                                break;
+                            case 3:
+                                // Rotate
+                                inRotate = true;
+                                startRotation = currentGameObject.transform.rotation;
+                                endRotation = Quaternion.Euler(currentGameObject.transform.rotation.eulerAngles + new Vector3(xVal * 20, yVal * 20, zVal * 20));
+                                startTimePan = Time.time;
+                                break;
+                            case 4:
+                                // Pan
+                                inPan = true;
+                                startPosition = currentGameObject.transform.position;
+                                endPosition = currentGameObject.transform.position + new Vector3(0, yVal * 25.0f, zVal * 25.0f);
+                                panLength = Vector3.Distance(currentGameObject.transform.position, endPosition);
+                                startTimePan = Time.time;
+                                break;
+                            default:
+                                Debug.Log("Gesture code not recognized");
+                                break;
+                        }
+                    }
+                    else
+                    {
+                        Debug.Log("Error parsing values out of named pipe");
+                        return;
+                    }
+                }
+            }
+        }
+        else if (im == inputMethodE.Box)
         {
             currentGameObject.transform.rotation = Quaternion.Euler(new Vector3(roll, yaw, pitch));
         }
@@ -236,7 +304,7 @@ public class ControlScript : MonoBehaviour
         {
             Debug.Log("Trying to connect to pipe name " + namedPipeName);
             clientStream = new NamedPipeClientStream(".", namedPipeName, PipeDirection.In);
-            clientStream.Connect(60);
+            clientStream.Connect();
         } catch (Win32Exception e)
         {
             Debug.Log("Failed to connect to named pipe");
@@ -253,18 +321,27 @@ public class ControlScript : MonoBehaviour
             ret = 0;
             try
             {
+                Debug.Log("Before read");
                 ret = clientStream.Read(buffer, 0, buffer.Length);
-            } catch (System.IO.IOException e)
+            } catch (System.Exception e)
             {
                 Debug.Log("Failed to read from pipe");
+                Debug.Log(e.Message);
                 break;
             }
+            Debug.Log("got past read");
+            Debug.Log(ret.ToString());
             if (ret > 0)
             {
                 byte[] gestureByteArr = new byte[ret];
                 System.Array.Copy(buffer, 0, gestureByteArr, 0, ret);
-                gloveGestureQueue.Enqueue(gestureByteArr);
+                Debug.Log("Beforequeue");
+                lock (lockobj)
+                {
+                    gloveGestureQueue.Enqueue(gestureByteArr);
+                }
             }
+            Debug.Log("end of loop");
         }
         clientStream.Close();
     }
